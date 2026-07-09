@@ -219,6 +219,54 @@ Often the resolved file is an entrypoint or barrel file (like `index.ts`) that r
 ### Stage 5: Post-Parse Local Call Linking (`_resolve_call_targets`)
 After the AST walk completes for a file, the parser runs a final pass over all extracted edges. Any remaining bare `CALLS` or `REFERENCES` targets are matched against the file's local symbol table (`nodes`). This ensures that late-defined or forward-referenced symbols within the same file are correctly qualified.
 
+## Multirepos
+
+Each repo has its own isolated graph database and data directory:
+
+```
+~/work/backend/.code-review-graph/graph.db
+~/work/frontend/.code-review-graph/graph.db
+```
+
+### Registry system
+
+A JSON registry at `~/.code-review-graph/registry.json` tracks known repos with optional aliases:
+
+```json
+{"repos": [
+  {"path": "/Users/me/work/backend", "alias": "api"},
+  {"path": "/Users/me/work/frontend", "alias": "web"}
+]}
+```
+
+CLI commands: `register`, `unregister`, `repos`.
+
+### Per-tool repo targeting
+
+Every MCP tool in `main.py` accepts an optional `repo_root` parameter. Resolution order (`_resolve_repo_root`, `main.py:69-82`):
+
+1. **Explicit `repo_root`** from the client — per-call override
+2. `--repo` CLI flag (sets `_default_repo_root`)
+3. CWD fallback (auto-detected via `find_project_root`)
+
+The daemon also supports `resolve_repo` in `registry.py:284-318` which resolves by alias first, then by path, then CWD.
+
+### Cross-repo search only
+
+Only `cross_repo_search_func` (`tools/registry_tools.py:49-125`) operates across all registered repos simultaneously — it iterates each repo's `GraphStore`, runs `hybrid_search`, tags results with `repo`/`repo_path`, and merges by score. Every other tool operates on a single repo per call.
+
+### Data directory override
+
+Per-repo data directory can be set via `--data-dir` flag at init time (stored in registry), or globally via `CRG_DATA_DIR` env var (`incremental.py:260-300`).
+
+### Connection pooling
+
+`ConnectionPool` (`registry.py:221-282`) provides thread-safe LRU-cached SQLite connections keyed by database path (max 10 connections, evicts LRU). Used by tools that may open multiple repos' databases concurrently.
+
+### Daemon auto-registration
+
+The daemon (`daemon.py:558-563`) auto-registers all configured repos in the registry on startup.
+
 ## Side Effect Audit
 - **Disk**: Database lives in `.code-review-graph/graph.db`.
 - **Git**: Heavy reliance on `git ls-files` and `git diff`.
