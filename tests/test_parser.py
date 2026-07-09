@@ -12,14 +12,67 @@ class TestCodeParser:
     def setup_method(self):
         self.parser = CodeParser()
 
-    def test_detect_language_python(self):
-        assert self.parser.detect_language(Path("foo.py")) == "python"
-
-    def test_detect_language_typescript(self):
-        assert self.parser.detect_language(Path("foo.ts")) == "typescript"
-
     def test_detect_language_unknown(self):
         assert self.parser.detect_language(Path("foo.txt")) is None
+
+    def test_detect_language_all_supported(self):
+        cases = {
+            "foo.py": "python",
+            "foo.js": "javascript",
+            "foo.jsx": "javascript",
+            "foo.ts": "typescript",
+            "foo.tsx": "tsx",
+            "foo.go": "go",
+            "foo.rs": "rust",
+            "foo.java": "java",
+            "foo.cs": "csharp",
+            "foo.rb": "ruby",
+            "foo.cpp": "cpp",
+            "foo.cc": "cpp",
+            "foo.cxx": "cpp",
+            "foo.c": "c",
+            "foo.h": "c",
+            "foo.hpp": "cpp",
+            "foo.kt": "kotlin",
+            "foo.swift": "swift",
+            "foo.php": "php",
+            "foo.scala": "scala",
+            "foo.sol": "solidity",
+            "foo.vue": "vue",
+            "foo.dart": "dart",
+            "foo.r": "r",
+            "foo.R": "r",
+            "foo.mjs": "javascript",
+            "foo.astro": "typescript",
+            "foo.pl": "perl",
+            "foo.pm": "perl",
+            "foo.t": "perl",
+            "foo.xs": "c",
+            "foo.lua": "lua",
+            "foo.luau": "luau",
+            "foo.m": "objc",
+            "foo.sh": "bash",
+            "foo.bash": "bash",
+            "foo.zsh": "bash",
+            "foo.ex": "elixir",
+            "foo.exs": "elixir",
+            "foo.ipynb": "notebook",
+        }
+        for filename, expected in cases.items():
+            assert self.parser.detect_language(Path(filename)) == expected, f"Failed for {filename}"
+
+    def test_single_print_statement(self):
+        """A file with only a single top-level call should be parsed correctly."""
+        fixture_path = FIXTURES / "single_print.py"
+        nodes, edges = self.parser.parse_file(fixture_path)
+
+        # 1. Verify File node exists
+        file_nodes = [n for n in nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].name == str(fixture_path)
+
+        # 2. Verify 1 edge
+        assert len(edges) == 1
 
     # --- Shebang detection for extension-less Unix scripts (#237) ---
 
@@ -178,6 +231,29 @@ class TestCodeParser:
         assert "authenticate" in func_names
         assert "create_auth_service" in func_names
         assert "process_request" in func_names
+        assert "log_creation" in func_names
+
+        # Verify nested class
+        session_mgr = next(n for n in classes if n.name == "SessionManager")
+        assert session_mgr.parent_name == "AuthService"
+        
+        # Verify nested function (log_creation is inside create_session)
+        log_func = next(n for n in funcs if n.name == "log_creation")
+        # parent_name should be cumulative: Class.Method
+        assert log_func.parent_name == "AuthService.SessionManager.create_session"
+
+        # Verify edges for nested class
+        file_path = str(FIXTURES / "sample_python.py")
+        contains_edges = [e for e in edges if e.kind == "CONTAINS"]
+        
+        # AuthService -> SessionManager
+        assert any(e.source == f"{file_path}::AuthService" 
+                   and e.target == f"{file_path}::AuthService.SessionManager" 
+                   for e in contains_edges)
+        
+        # create_session -> log_creation
+        assert any("create_session" in e.source and "log_creation" in e.target 
+                   for e in contains_edges)
 
     def test_parse_python_edges(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")

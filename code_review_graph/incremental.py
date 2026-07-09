@@ -17,6 +17,8 @@ import sys
 import threading
 import time
 from pathlib import Path, PurePosixPath
+import typing
+from typing import Optional
 from typing import Callable, Optional
 
 from .graph import GraphStore
@@ -363,31 +365,40 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     return patterns
 
 
-def _should_ignore(path: str, patterns: list[str]) -> bool:
-    """Check if a path matches any ignore pattern.
-
-    Handles nested occurrences of ``<dir>/**`` patterns: for example,
-    ``node_modules/**`` also matches ``packages/app/node_modules/foo.js``
-    inside monorepos. ``fnmatch`` alone treats ``*`` as not crossing ``/``
-    and only matches the prefix, so we additionally test each path segment
-    against the bare prefix of ``<dir>/**`` patterns. See: #91
-    """
-    # Direct fnmatch first (cheap)
-    if any(fnmatch.fnmatch(path, p) for p in patterns):
+def _is_match(path: str, pattern: str) -> bool:
+    """Check if a path matches a pattern (handles glob and nested dir)."""
+    if fnmatch.fnmatch(path, pattern):
         return True
-    # Then: treat simple single-segment "dir/**" patterns as
-    # "this directory at any depth".
-    parts = PurePosixPath(path).parts
-    for p in patterns:
-        if not p.endswith("/**"):
-            continue
-        prefix = p[:-3]
+    if pattern.endswith("/**"):
+        prefix = pattern[:-3]
         # Only single-segment dir patterns (no "/" inside the prefix)
         # qualify for nested matching.
-        if "/" in prefix or not prefix:
-            continue
-        if prefix in parts:
-            return True
+        # Example: 'node_modules/**' matches 'packages/app/node_modules/react/index.js'
+        if "/" not in prefix and prefix:
+            if prefix in PurePosixPath(path).parts:
+                return True
+    return False
+
+
+def _should_ignore(path: str, patterns: list[str]) -> bool:
+    """Check if a path matches any ignore pattern, respecting negation (!) overrides.
+
+    Patterns are processed in order; the FIRST match wins and terminates the check.
+    Handles nested occurrences of ``<dir>/**`` patterns. See: #91
+
+    Important: Because of first-match-wins behavior, negation patterns (`!`) must
+    be placed BEFORE the broader ignore patterns that would otherwise match them.
+    Example:
+        - Correct: ["!node_modules/keep.py", "node_modules/**"] -> keeps keep.py
+        - Incorrect: ["node_modules/**", "!node_modules/keep.py"] -> ignores keep.py
+    """
+    for p in patterns:
+        negated = p.startswith("!")
+        pattern = p[1:] if negated else p
+
+        if _is_match(path, pattern):
+            return not negated
+
     return False
 
 
@@ -668,24 +679,60 @@ def collect_all_files(
     repo_root: Path,
     recurse_submodules: bool | None = None,
 ) -> list[str]:
-    """Collect all parseable files in the repo, respecting ignore patterns.
+    """Collect all parseable files in the repo, respecting ignore and include patterns.
 
     Args:
         repo_root: Repository root directory.
         recurse_submodules: If True, include files from git submodules.
             When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+        include_patterns: Optional list of patterns to explicitly include.
+            If provided, only files matching one or more of these patterns
+            (and not ignored) will be collected.
     """
     ignore_patterns = _load_ignore_patterns(repo_root)
+    # Prune patterns are only the leading non-negated patterns.
+    # We stop as soon as we see a "!" because we can no longer safely
+    # prune a directory if a later pattern might "rescue" a file inside it.
+    prune_patterns = []
+    for p in ignore_patterns:
+        if p.startswith("!"):
+            break
+        prune_patterns.append(p)
+
     parser = CodeParser(repo_root)
     files = []
 
+    def _get_candidates():
+        # 2. Fallback: walk directory (lazy generator with pruning)
+        repo_root_str = str(repo_root)
+        for root, dirs, _files in os.walk(repo_root_str):
+            # Calculate relative path for matching
+            rel_root = os.path.relpath(root, repo_root_str)
+            if rel_root == ".":
+                rel_root = ""
+
+            # Prune ignored directories in-place!
+            # Use prune_patterns (ignoring negations) for safe subtree skipping.
+            dirs[:] = [
+                d for d in dirs
+                if not _should_ignore(os.path.join(rel_root, d), prune_patterns)
+            ]
+
+            for f in _files:
+                rel_path = os.path.join(rel_root, f)
+                yield rel_path
+
+
     # Prefer git ls-files for tracked files
-    tracked = get_all_tracked_files(repo_root, recurse_submodules)
+    tracked = None
+    if (repo_root / ".git").exists():
+        tracked = get_all_tracked_files(repo_root, recurse_submodules)
+
     if tracked:
         candidates = tracked
     else:
         # Fallback: walk directory
-        candidates = [str(p.relative_to(repo_root)) for p in repo_root.rglob("*") if p.is_file()]
+        candidates = list(_get_candidates())
 
     for rel_path in candidates:
         if _should_ignore(rel_path, ignore_patterns):
@@ -704,10 +751,11 @@ def collect_all_files(
             continue
         if full_path.is_symlink():
             continue
-        if parser.detect_language(full_path) is None:
-            continue
         if _is_binary(full_path):
             continue
+        if parser.detect_language(full_path) is None:
+            continue
+            
         files.append(rel_path)
 
     return files
@@ -929,6 +977,7 @@ def incremental_update(
     # Determine changed files
     if changed_files is None:
         changed_files = get_changed_files(repo_root, base)
+    print(f"Changed files: {changed_files}")
 
     if not changed_files:
         return {

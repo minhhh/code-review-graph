@@ -27,6 +27,14 @@ class AuthService(BaseService):
     def _validate_token(self, token: str) -> bool:
         return token == self.secret
 
+    class SessionManager:
+        """Nested class to manage user sessions."""
+        def create_session(self, user_id):
+            def log_creation():
+                print(f"Session created for {user_id}")
+            log_creation()
+            return "session_id_123"
+
 
 def create_auth_service() -> AuthService:
     secret = os.environ.get("SECRET", "default")

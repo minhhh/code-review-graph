@@ -1,0 +1,9 @@
+Assets/**
+Library/**
+PackageCache/**
+
+.mypy_cache/**
+venv*/**
+node_modules/**
+
+**/*.md

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch  # noqa: F401 – patch used in tests
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _is_binary,
+    _is_match,
     _load_ignore_patterns,
     _parse_single_file,
     _should_ignore,
@@ -241,6 +242,54 @@ class TestIgnorePatterns:
         # Coverage/cache
         assert _should_ignore("coverage/lcov.info", patterns)
         assert _should_ignore(".cache/webpack/index.pack", patterns)
+
+    def test_should_ignore_negations(self):
+        """Negations (!) should only work if they match BEFORE the ignore pattern (first-match-wins)."""
+        # 1. Broad ignore first -> Negation is ignored (stay ignored)
+        patterns = ["node_modules/**", "!node_modules/keep.py"]
+        assert _should_ignore("node_modules/keep.py", patterns) is True
+
+        # 2. First-match-wins: broad ignore terminates before later negations
+        patterns = ["node_modules/**", "!*.md"]
+        assert _should_ignore("node_modules/keep.py", patterns) is True
+        assert _should_ignore("node_modules/other.py", patterns) is True
+        assert _should_ignore("node_modules/other.md", patterns) is True
+        assert _should_ignore("other.md", patterns) is False
+        assert _should_ignore("hello.py", patterns) is False
+
+        # 3. Negation first -> Honored (not ignored)
+        patterns = ["!node_modules/keep.py", "node_modules/**"]
+        assert _should_ignore("node_modules/keep.py", patterns) is False
+        assert _should_ignore("node_modules/other.py", patterns) is True
+
+
+class TestIsMatch:
+    """Tests for internal _is_match glob helper."""
+
+    def test_exact_match(self):
+        assert _is_match("foo.py", "foo.py")
+        assert not _is_match("foo.py", "bar.py")
+
+    def test_wildcard_match(self):
+        assert _is_match("foo.py", "*.py")
+        assert _is_match("src/foo.py", "src/*.py")
+        assert _is_match("src/foo.py", "*.py")  # fnmatch.fnmatch matches across "/"
+
+    def test_nested_directory_wildcard(self):
+        """_is_match should handle <dir>/** for nested paths."""
+        pattern = "node_modules/**"
+        assert _is_match("node_modules/foo/bar.js", pattern)
+        assert _is_match("packages/app/node_modules/react/index.js", pattern)
+        assert _is_match("node_modules/index.js", pattern)
+        assert not _is_match("src/node_modules_helper/foo.py", pattern)
+
+    def test_nested_directory_multiple_segments_not_supported(self):
+        """_is_match only supports single-segment nested dir matching for now."""
+        # 'a/b/**' will match 'a/b/c.py' but not 'root/a/b/c.py' because of
+        # the "/" check in _is_match prefix logic.
+        pattern = "a/b/**"
+        assert _is_match("a/b/c.py", pattern)  # via fnmatch
+        assert not _is_match("root/a/b/c.py", pattern)
 
 
 class TestDataDir:
@@ -499,7 +548,8 @@ class TestGitOperations:
             returncode=0,
             stdout="a.py\nb.py\nc.go\n",
         )
-        result = get_all_tracked_files(tmp_path)
+        
+        result = list(get_all_tracked_files(tmp_path))
         assert result == ["a.py", "b.py", "c.go"]
 
     @patch("code_review_graph.incremental.subprocess.run")
@@ -510,7 +560,8 @@ class TestGitOperations:
             returncode=0,
             stdout="a.py\nsub/b.py\n",
         )
-        result = get_all_tracked_files(tmp_path, recurse_submodules=True)
+
+        result = list(get_all_tracked_files(tmp_path, recurse_submodules=True))
         assert result == ["a.py", "sub/b.py"]
         cmd = mock_run.call_args[0][0]
         assert "--recurse-submodules" in cmd
@@ -523,7 +574,8 @@ class TestGitOperations:
             returncode=0,
             stdout="a.py\n",
         )
-        result = get_all_tracked_files(tmp_path)
+
+        result = list(get_all_tracked_files(tmp_path))
         assert result == ["a.py"]
         cmd = mock_run.call_args[0][0]
         assert "--recurse-submodules" not in cmd
@@ -537,8 +589,9 @@ class TestGitOperations:
             returncode=0,
             stdout="a.py\nsub/c.py\n",
         )
+
         # None -> falls back to env var (_RECURSE_SUBMODULES=True)
-        result = get_all_tracked_files(tmp_path, recurse_submodules=None)
+        result = list(get_all_tracked_files(tmp_path, recurse_submodules=None))
         assert result == ["a.py", "sub/c.py"]
         cmd = mock_run.call_args[0][0]
         assert "--recurse-submodules" in cmd
@@ -552,8 +605,9 @@ class TestGitOperations:
             returncode=0,
             stdout="a.py\n",
         )
+
         # Explicit False overrides env var
-        result = get_all_tracked_files(tmp_path, recurse_submodules=False)
+        result = list(get_all_tracked_files(tmp_path, recurse_submodules=False))
         assert result == ["a.py"]
         cmd = mock_run.call_args[0][0]
         assert "--recurse-submodules" not in cmd

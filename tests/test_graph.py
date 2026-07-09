@@ -8,6 +8,8 @@ from pathlib import Path
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import EdgeInfo, NodeInfo
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 
 class TestGraphStore:
     def setup_method(self):
@@ -276,6 +278,51 @@ class TestGraphStore:
         assert result == []
         assert "Communities list unavailable" in caplog.text
         conn.close()
+
+    def test_parse_and_store_python(self):
+        """Integration test: parse real python file and store it."""
+        from code_review_graph.parser import CodeParser
+        parser = CodeParser()
+        fixture_path = FIXTURES / "sample_python.py"
+
+        nodes, edges = parser.parse_file(fixture_path)
+        self.store.store_file_nodes_edges(str(fixture_path), nodes, edges)
+        self.store.commit()
+
+        # 1. Verify top-level class
+        auth_svc = self.store.get_node(f"{fixture_path}::AuthService")
+        assert auth_svc is not None
+        assert auth_svc.kind == "Class"
+
+        # 2. Verify nested class (cumulative qualification)
+        session_mgr = self.store.get_node(f"{fixture_path}::AuthService.SessionManager")
+        assert session_mgr is not None
+        assert session_mgr.kind == "Class"
+
+        # 3. Verify method in nested class
+        create_session = self.store.get_node(f"{fixture_path}::AuthService.SessionManager.create_session")
+        assert create_session is not None
+
+        # 4. Verify inheritance
+        inherits = [e for e in self.store.get_edges_by_source(f"{fixture_path}::AuthService") if e.kind == "INHERITS"]
+        assert len(inherits) == 1
+        # In current parser implementation, inheritance targets remain unqualified names
+        assert inherits[0].target_qualified == "BaseService"
+
+        # 5. Verify containment
+        # auth.py CONTAINS AuthService
+        # AuthService CONTAINS SessionManager
+        edges = self.store.get_edges_by_source(str(fixture_path))
+        contains_auth = [e for e in edges if e.target_qualified == f"{fixture_path}::AuthService"]
+        assert len(contains_auth) == 1
+
+        # 6. Verify bulk retrieval
+        file_nodes = self.store.get_nodes_by_file(str(fixture_path))
+        assert len(file_nodes) == 16
+        node_names = {n.name for n in file_nodes}
+        assert "AuthService" in node_names
+        assert "process_request" in node_names
+
 
 
 class TestImpactRadiusSql:

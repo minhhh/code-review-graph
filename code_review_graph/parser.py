@@ -2336,7 +2336,7 @@ class CodeParser:
             # --- Classes ---
             if node_type in class_types and self._extract_classes(
                 child, source, language, file_path, nodes, edges,
-                enclosing_class, import_map, defined_names,
+                enclosing_class, enclosing_func, import_map, defined_names,
                 _depth,
             ):
                 continue
@@ -2530,9 +2530,11 @@ class CodeParser:
                 line=node.start_point[0] + 1,
             ))
             if do_block is not None:
+                # Cumulative class path for nested modules
+                full_mod_path = f"{enclosing_class}.{mod_name}" if enclosing_class else mod_name
                 self._extract_from_tree(
                     do_block, source, language, file_path, nodes, edges,
-                    enclosing_class=mod_name,
+                    enclosing_class=full_mod_path,
                     enclosing_func=None,
                     import_map=import_map, defined_names=defined_names,
                     _depth=_depth + 1,
@@ -2581,10 +2583,12 @@ class CodeParser:
                 line=node.start_point[0] + 1,
             ))
             if do_block is not None:
+                # Cumulative path for nested functions/macros
+                full_fn_path = f"{enclosing_class}.{fn_name}" if enclosing_class else fn_name
                 self._extract_from_tree(
                     do_block, source, language, file_path, nodes, edges,
                     enclosing_class=enclosing_class,
-                    enclosing_func=fn_name,
+                    enclosing_func=full_fn_path,
                     import_map=import_map, defined_names=defined_names,
                     _depth=_depth + 1,
                 )
@@ -3680,8 +3684,8 @@ class CodeParser:
         # Structure: function_call > identifier("require") > arguments > string
         first_child = call_node.children[0] if call_node.children else None
         if (
-            not first_child
-            or first_child.type != "identifier"
+            not first_child 
+            or first_child.type != "identifier" 
             or first_child.text != b"require"
         ):
             return None
@@ -4249,6 +4253,7 @@ class CodeParser:
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
         enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
         import_map: Optional[dict[str, str]],
         defined_names: Optional[set[str]],
         _depth: int,
@@ -4309,9 +4314,12 @@ class CodeParser:
         nodes.append(node)
 
         # CONTAINS edge
+        container = (
+            self._qualify(enclosing_class, file_path, None) if enclosing_class else file_path
+        )
         edges.append(EdgeInfo(
             kind="CONTAINS",
-            source=file_path,
+            source=container,
             target=self._qualify(name, file_path, enclosing_class),
             file_path=file_path,
             line=child.start_point[0] + 1,
@@ -4323,7 +4331,9 @@ class CodeParser:
             edges.append(EdgeInfo(
                 kind="INHERITS",
                 source=self._qualify(
-                    name, file_path, enclosing_class,
+                    name,
+                    file_path,
+                    enclosing_class,
                 ),
                 target=base,
                 file_path=file_path,
@@ -4340,10 +4350,11 @@ class CodeParser:
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
 
-        # Recurse into class body
+        # Recurse into class body with cumulative path
+        full_class_path = f"{enclosing_class}.{name}" if enclosing_class else name
         self._extract_from_tree(
             child, source, language, file_path, nodes, edges,
-            enclosing_class=name, enclosing_func=None,
+            enclosing_class=full_class_path, enclosing_func=None,
             import_map=import_map, defined_names=defined_names,
             _depth=_depth + 1,
         )
@@ -4418,16 +4429,13 @@ class CodeParser:
         is_test = _is_test_function(name, file_path, decorators)
         kind = "Test" if is_test else "Function"
 
-        # Julia: nested functions (``function inner`` inside another
-        # ``function outer``) should wire up to their enclosing function,
-        # not skip past it to the enclosing class/module.
-        parent_name = enclosing_class
-        container_scope = enclosing_class
-        if language == "julia" and enclosing_func:
-            parent_name = enclosing_func
-            container_scope = enclosing_func
+        # Combine class and function paths for a truly unique prefix
+        if enclosing_class and enclosing_func:
+            prefix = f"{enclosing_class}.{enclosing_func}"
+        else:
+            prefix = enclosing_class or enclosing_func
 
-        qualified = self._qualify(name, file_path, parent_name)
+        qualified = self._qualify(name, file_path, prefix)
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
 
@@ -4452,7 +4460,7 @@ class CodeParser:
             line_start=child.start_point[0] + 1,
             line_end=child.end_point[0] + 1,
             language=language,
-            parent_name=parent_name,
+            parent_name=prefix,
             params=params,
             return_type=ret_type,
             is_test=is_test,
@@ -4462,8 +4470,8 @@ class CodeParser:
 
         # CONTAINS edge
         container = (
-            self._qualify(container_scope, file_path, None)
-            if container_scope
+            self._qualify(prefix, file_path, None)
+            if prefix
             else file_path
         )
         edges.append(EdgeInfo(
@@ -4543,10 +4551,12 @@ class CodeParser:
                             ))
                             break
 
-        # Recurse to find calls inside the function
+        # Recurse to find calls and nested functions. Use cumulative path
+        # for enclosing_func so nested functions are uniquely qualified.
+        full_func_path = f"{enclosing_func}.{name}" if enclosing_func else name
         self._extract_from_tree(
             child, source, language, file_path, nodes, edges,
-            enclosing_class=enclosing_class, enclosing_func=name,
+            enclosing_class=enclosing_class, enclosing_func=full_func_path,
             import_map=import_map, defined_names=defined_names,
             _depth=_depth + 1,
         )

@@ -1865,10 +1865,10 @@ class TestRescriptCrossModuleResolver:
     """Integration test for the cross-module resolver post-pass."""
 
     def _build(self, tmp_path):
+        import subprocess
+
         from code_review_graph.graph import GraphStore
         from code_review_graph.incremental import full_build
-
-        (tmp_path / ".git").mkdir()
 
         (tmp_path / "LogicUtils.res").write_text(
             "let safeParse = (s) => s\n"
@@ -1891,9 +1891,20 @@ class TestRescriptCrossModuleResolver:
             "let make = (~name) => name\n"
         )
 
+        # Initialise a real git repo so `git ls-files` enumerates the fixtures.
+        _git = lambda *args: subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.email=t@t.com",
+             "-c", "user.name=T", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, stdin=subprocess.DEVNULL,
+        )
+        _git("init", "-q")
+        _git("add", ".")
+        _git("commit", "-q", "-m", "init")
+
         store = GraphStore(tmp_path / "graph.db")
         result = full_build(tmp_path, store)
         return store, result
+
 
     def test_qualified_call_resolves_to_canonical_node(self, tmp_path):
         store, _ = self._build(tmp_path)
